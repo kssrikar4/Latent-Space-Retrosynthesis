@@ -1,0 +1,26 @@
+{
+  "architectures": [
+    "DynamicLatentThinkingRetroModel"
+  ],
+  "model_type": "latent-thinking-retrosynthesis",
+  "in_dim": 1040,
+  "latent_dim": 256,
+  "max_thought_steps": 6,
+  "halting_threshold": 0.5,
+  "temperature": 0.07,
+  "torch_dtype": "float32",
+  "transformers_version": "4.55.2",
+  "projector_layers": [
+    1040,
+    512,
+    384,
+    256
+  ],
+  "synthesis_head_layers": [
+    512,
+    512,
+    384,
+    256
+  ],
+  "normalization": "LayerNorm + L2_unit_hypersphere"
+}

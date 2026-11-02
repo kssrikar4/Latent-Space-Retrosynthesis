@@ -1,0 +1,42 @@
+{
+  "test_routes_evaluated": 57147,
+  "retrieval": {
+    "top1": 93.14,
+    "top3": 98.34,
+    "top5": 99.22,
+    "top10": 99.58,
+    "top20": 99.76,
+    "mrr": 0.9581
+  },
+  "property_parity": {
+    "molecular_weight": {
+      "r2": 0.9403,
+      "mae": 7.92
+    },
+    "logp": {
+      "r2": 0.9441,
+      "mae": 0.096
+    },
+    "tpsa": {
+      "r2": 0.9431,
+      "mae": 2.12
+    },
+    "heavy_atom_count": {
+      "r2": 0.9552,
+      "mae": 0.41
+    }
+  },
+  "tanimoto_similarity": {
+    "mean": 0.968,
+    "median": 1.0,
+    "exact_match_pct": 93.21
+  },
+  "latent_cosine_similarity": {
+    "mean": 0.8815,
+    "median": 0.8924
+  },
+  "step_parity": {
+    "exact_step_accuracy": 67.64,
+    "within_one_step_accuracy": 90.16
+  }
+}

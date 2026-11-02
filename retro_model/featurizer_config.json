@@ -1,0 +1,25 @@
+{
+  "featurizer_type": "MorganFP_Physicochemical",
+  "fp_bits": 1024,
+  "fp_radius": 2,
+  "num_descriptors": 16,
+  "total_feature_dim": 1040,
+  "descriptor_names": [
+    "MolWt/500",
+    "MolLogP/5",
+    "TPSA/150",
+    "NumHDonors/10",
+    "NumHAcceptors/10",
+    "NumRotatableBonds/15",
+    "FractionCSP3",
+    "RingCount/8",
+    "NumAromaticRings/6",
+    "NumHeteroatoms/15",
+    "LabuteASA/200",
+    "HeavyAtomCount/50",
+    "NHOHCount/10",
+    "NOCount/15",
+    "NumAliphaticRings/6",
+    "NumSaturatedRings/6"
+  ]
+}
