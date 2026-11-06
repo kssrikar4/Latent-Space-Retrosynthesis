@@ -42,7 +42,6 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.benchmark = True
 
-# --- 1. Vectorized Parallel Chunk Featurizer ---
 def _featurize_smiles_chunk(smiles_chunk):
     gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024)
     packed_fps = np.zeros((len(smiles_chunk), 128), dtype=np.uint8)
@@ -79,8 +78,7 @@ def _featurize_smiles_chunk(smiles_chunk):
 
     return packed_fps, descs
 
-# --- 2. Ultra-Fast Deduplicated Route Dataset with Persistent Binary Cache ---
-def build_or_load_dataset(routes_path="PaRoutes 2.0 and USPTO/all_loaded_routes.json.gz",
+def build_or_load_dataset(routes_path="PaRoutes 2.0/all_loaded_routes.json.gz",
                           cache_path="preprocessed_routes_cache.npz",
                           max_routes=0,
                           num_workers=8):
@@ -88,11 +86,11 @@ def build_or_load_dataset(routes_path="PaRoutes 2.0 and USPTO/all_loaded_routes.
         print(f"Loading preprocessed binary dataset from disk cache: {cache_path}...")
         t0 = time.time()
         cached = np.load(cache_path, allow_pickle=True)
-        cached_max = int(cached.get("max_routes", 0))
+        cached_count = len(cached["p_ids"])
+        is_valid_cache = (cached_count >= 400000) if max_routes == 0 else (cached_count >= max_routes)
 
-        # Check if cache matches requested routes
-        if max_routes == 0 or cached_max == max_routes or (cached_max > 0 and max_routes <= cached_max):
-            n_use = len(cached["p_ids"]) if max_routes == 0 else min(len(cached["p_ids"]), max_routes)
+        if is_valid_cache:
+            n_use = cached_count if max_routes == 0 else min(cached_count, max_routes)
             data = {
                 "lookup_fps": cached["lookup_fps"],
                 "lookup_descs": cached["lookup_descs"],
@@ -108,8 +106,44 @@ def build_or_load_dataset(routes_path="PaRoutes 2.0 and USPTO/all_loaded_routes.
     print(f"Cache not found or outdated.")
     t0 = time.time()
 
-    with gzip.open(routes_path, 'rt') as f:
-        routes = json.load(f)
+    resolved_path = routes_path
+    if not os.path.exists(resolved_path):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            routes_path,
+            os.path.join(script_dir, routes_path),
+            "PaRoutes 2.0/all_loaded_routes.json.gz",
+            os.path.join(script_dir, "PaRoutes 2.0", "all_loaded_routes.json.gz"),
+            "PaRoutes 2.0 and USPTO/all_loaded_routes.json.gz",
+            os.path.join(script_dir, "PaRoutes 2.0 and USPTO", "all_loaded_routes.json.gz"),
+            "PaRoutes 2.0/ref_routes_n5.json",
+            "PaRoutes 2.0/ref_routes_n1.json"
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                resolved_path = c
+                break
+
+    if not os.path.exists(resolved_path):
+        raise FileNotFoundError(f"Routes file not found at: {routes_path}")
+
+    routes = []
+    if os.path.isdir(resolved_path):
+        for fn in ["ref_routes_n5.json", "ref_routes_n1.json"]:
+            fp = os.path.join(resolved_path, fn)
+            if os.path.exists(fp):
+                with open(fp, 'r', encoding='utf-8') as f:
+                    routes.extend(json.load(f))
+    elif resolved_path.endswith('.gz'):
+        try:
+            with gzip.open(resolved_path, 'rt', encoding='utf-8') as f:
+                routes = json.load(f)
+        except gzip.BadGzipFile:
+            with open(resolved_path, 'r', encoding='utf-8') as f:
+                routes = json.load(f)
+    else:
+        with open(resolved_path, 'r', encoding='utf-8') as f:
+            routes = json.load(f)
 
     if max_routes and max_routes > 0:
         routes = routes[:max_routes]
@@ -152,7 +186,7 @@ def build_or_load_dataset(routes_path="PaRoutes 2.0 and USPTO/all_loaded_routes.
         if len(dedup_inter) >= 1 and len(leaves) >= 1:
             can_p = target
             can_r = ".".join(sorted(leaves))
-            can_inter = dedup_inter[:6] # cap max dynamic steps at 6
+            can_inter = dedup_inter[:6]
 
             if can_inter[0] != can_p and can_inter[0] not in leaves:
                 parsed_routes.append((can_p, can_inter, can_r))
@@ -164,7 +198,6 @@ def build_or_load_dataset(routes_path="PaRoutes 2.0 and USPTO/all_loaded_routes.
     print(f"Parsed {len(parsed_routes)} valid routes in {time.time()-t1:.2f} s.")
     print(f"Total unique molecules to featurize: {len(unique_smiles_set)} (Deduplication eliminated ~3x redundant calculations)")
 
-    # Parallel Featurization of UNIQUE molecules only
     t2 = time.time()
     unique_smiles_list = sorted(list(unique_smiles_set))
     smi_to_id = {s: idx for idx, s in enumerate(unique_smiles_list)}
@@ -180,7 +213,6 @@ def build_or_load_dataset(routes_path="PaRoutes 2.0 and USPTO/all_loaded_routes.
     lookup_fps = np.vstack([r[0] for r in results])
     lookup_descs = np.vstack([r[1] for r in results])
 
-    # Convert routes to fast integer index matrices
     n_routes = len(parsed_routes)
     p_ids = np.zeros(n_routes, dtype=np.int32)
     r_ids = np.zeros(n_routes, dtype=np.int32)
@@ -205,7 +237,6 @@ def build_or_load_dataset(routes_path="PaRoutes 2.0 and USPTO/all_loaded_routes.
         "max_routes": max_routes
     }
 
-    # Save to disk cache for instant reuse
     np.savez_compressed(cache_path, **dataset_dict)
     print(f"Cache saved successfully ({os.path.getsize(cache_path)/(1024**2):.2f} MB on disk). Total preparation time: {time.time()-t0:.2f} s.")
 
@@ -234,7 +265,6 @@ def collate_indices(batch):
     num_steps = torch.tensor([b[3] for b in batch], dtype=torch.long)
     return p_ids, r_ids, inter_ids, num_steps
 
-# --- 3. Dynamic Neural Architectures ---
 class DynamicMolecularProjector(nn.Module):
     def __init__(self, in_dim=1040, latent_dim=256):
         super().__init__()
@@ -312,7 +342,6 @@ def infonce_loss(pred, target, tau=0.07):
     labels = torch.arange(pred.size(0), device=pred.device)
     return F.cross_entropy(sim, labels)
 
-# --- 4. Training Engine (FP32) ---
 def train_full_model(train_loader, val_loader, gpu_table, device, epochs=15, latent_dim=256):
 
     projector = DynamicMolecularProjector(in_dim=1040, latent_dim=latent_dim).to(device)
@@ -350,10 +379,8 @@ def train_full_model(train_loader, val_loader, gpu_table, device, epochs=15, lat
 
             thought_states, halt_probs, z_r_pred = model.forward_dynamic(z_p, max_steps=max_steps)
 
-            # Precursor InfoNCE loss
             l_reac = infonce_loss(z_r_pred, z_r, tau=0.07)
 
-            # Dynamic intermediate loss
             l_inter = torch.tensor(0.0, device=device)
             valid_steps = 0
             for step_idx in range(max_steps):
@@ -370,7 +397,6 @@ def train_full_model(train_loader, val_loader, gpu_table, device, epochs=15, lat
             if valid_steps > 0:
                 l_inter = l_inter / valid_steps
 
-            # Dynamic Halting BCE loss
             l_halt = torch.tensor(0.0, device=device)
             for step_idx in range(max_steps):
                 active_idx = torch.where(num_steps > step_idx)[0]
@@ -395,7 +421,6 @@ def train_full_model(train_loader, val_loader, gpu_table, device, epochs=15, lat
         avg_l_inter = tot_l_inter / len(train_loader)
         scheduler.step()
 
-        # Validation (Consistent Multi-Task Loss + Epoch Top-1 Accuracy)
         projector.eval()
         model.eval()
         tot_val = 0.0
@@ -454,7 +479,6 @@ def train_full_model(train_loader, val_loader, gpu_table, device, epochs=15, lat
                 tot_val += val_loss.item()
                 tot_cos_r += F.cosine_similarity(z_r_pred, z_r, dim=-1).mean().item()
 
-                # Batch retrieval accuracy
                 batch_sim = torch.mm(z_r_pred, z_r.t())
                 val_correct_top1 += (torch.argmax(batch_sim, dim=-1) == torch.arange(z_r_pred.size(0), device=device)).sum().item()
                 val_total += z_r_pred.size(0)
@@ -483,7 +507,6 @@ def train_full_model(train_loader, val_loader, gpu_table, device, epochs=15, lat
         "total_time": total_time
     }
 
-# --- 5. Candidate Retrieval, True vs. Pred Evaluation ---
 def compute_tanimoto_batch(fps_true_packed, fps_pred_packed):
     bits_true = np.unpackbits(fps_true_packed, axis=-1).astype(np.int32)
     bits_pred = np.unpackbits(fps_pred_packed, axis=-1).astype(np.int32)
@@ -514,7 +537,6 @@ def mol_to_image_clean(mol, size=(340, 260), legend=""):
     return Image.open(io.BytesIO(png_data))
 
 def mols_grid_clean(mols, legends=None, sub_size=(220, 200), mols_per_row=3):
-    """Renders a collection of reactant building blocks side-by-side."""
     clean_mols = []
     clean_legends = []
     for idx, m in enumerate(mols):
@@ -538,7 +560,8 @@ def mols_grid_clean(mols, legends=None, sub_size=(220, 200), mols_per_row=3):
         useSVG=False
     )
 
-def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, device, lookup_descs=None, lookup_fps=None, unique_smiles=None, out_dir="."):
+def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, device, lookup_descs=None, lookup_fps=None, unique_smiles=None, out_dir="plots"):
+    os.makedirs(out_dir, exist_ok=True)
     projector = trained_bundle["projector"]
     model = trained_bundle["model"]
     history = trained_bundle["history"]
@@ -571,10 +594,9 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
             z_r = projector(fp_r)
             thought_states, halt_probs, z_r_pred = model.forward_dynamic(z_p, max_steps=max_steps)
 
-            # Determine predicted halting step: first step with p_halt > 0.5, else argmax
-            halt_tensor = torch.stack([h.squeeze(-1) for h in halt_probs], dim=1) # (B, max_steps)
+            halt_tensor = torch.stack([h.squeeze(-1) for h in halt_probs], dim=1)
             pred_halt = (halt_tensor > 0.5).int()
-            first_halt = torch.argmax(pred_halt, dim=1) + 1 # 1-indexed
+            first_halt = torch.argmax(pred_halt, dim=1) + 1
             no_halt_mask = (pred_halt.sum(dim=1) == 0)
             if no_halt_mask.any():
                 max_halt = torch.argmax(halt_tensor, dim=1) + 1
@@ -592,14 +614,13 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
                 all_z_i1.append(projector(target_feat_i1).cpu())
                 all_thought_states.append(thought_states[0].cpu())
 
-    pred_matrix = torch.cat(all_z_r_pred, dim=0) # (N_test, latent_dim)
-    cand_matrix = torch.cat(all_z_r_true, dim=0) # (N_test, latent_dim)
+    pred_matrix = torch.cat(all_z_r_pred, dim=0)
+    cand_matrix = torch.cat(all_z_r_true, dim=0)
     pred_halt_steps = torch.cat(all_pred_halt_steps, dim=0).numpy()
     true_steps = torch.cat(all_true_steps, dim=0).numpy()
     test_r_ids = torch.cat(all_test_r_ids, dim=0).numpy()
     N_test = pred_matrix.shape[0]
 
-    # GPU Chunked Candidate Retrieval & Identification
     print(f"Computing candidate retrieval across {N_test} test reactions (GPU Chunked)...")
     top1, top3, top5, top10, top20 = 0, 0, 0, 0, 0
     mrr = 0.0
@@ -649,7 +670,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
     plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
     epochs = range(1, len(history["train_loss"]) + 1)
 
-    # Plot 1: Loss & Cosine Similarity Convergence
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), dpi=300)
     axes[0].plot(epochs, history["train_loss"], 'o-', color='#1f77b4', linewidth=2.0, label='Train Loss')
     axes[0].plot(epochs, history["val_loss"], 's--', color='#d62728', linewidth=2.0, label='Validation Loss')
@@ -674,7 +694,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
     plt.close()
     print(f"Saved: {p1}")
 
-    # Plot 2: Precursor Candidate Retrieval Top-K Curve
     fig, ax = plt.subplots(figsize=(8, 5.2), dpi=300)
     k_vals = [1, 3, 5, 10, 20]
     acc_vals = [retrieval["top1"], retrieval["top3"], retrieval["top5"], retrieval["top10"], retrieval["top20"]]
@@ -694,7 +713,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
     plt.close()
     print(f"Saved: {p2}")
 
-    # Also save standard bar chart for backward compatibility
     fig, ax = plt.subplots(figsize=(8.5, 5), dpi=300)
     metrics_bar = ["Top-1", "Top-3", "Top-5", "Top-10"]
     vals_bar = [retrieval["top1"], retrieval["top3"], retrieval["top5"], retrieval["top10"]]
@@ -712,7 +730,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
     plt.close()
     print(f"Saved: {p2_bar}")
 
-    # True vs Pred Chemical Parity & Similarity Evaluation
     eval_metrics = {}
     if lookup_descs is not None and lookup_fps is not None:
         print("Evaluating True vs Predicted chemical properties, fingerprints, and thinking parity...")
@@ -741,7 +758,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
         print(f"TPSA:                R² = {tpsa_r2:.4f} | MAE = {tpsa_mae:.2f} Å²")
         print(f"Heavy Atom Count:    R² = {hac_r2:.4f} | MAE = {hac_mae:.2f}")
 
-        # Tanimoto Similarities
         true_fps = lookup_fps[true_mol_ids]
         pred_fps = lookup_fps[pred_mol_ids]
         tanimoto_sims = compute_tanimoto_batch(true_fps, pred_fps)
@@ -753,12 +769,10 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
 
         print(f"Precursor Tanimoto Similarity: Mean = {mean_tanimoto:.4f} | Median = {median_tanimoto:.4f} | Exact Match = {exact_match_pct:.2f}%")
 
-        # Step Parity
         step_acc = float((pred_halt_steps == true_steps).sum() / N_test * 100.0)
         step_within1 = float((np.abs(pred_halt_steps - true_steps) <= 1).sum() / N_test * 100.0)
         print(f"Thinking Step Accuracy: Exact = {step_acc:.2f}% | Within ±1 step = {step_within1:.2f}%")
 
-        # Plot 3: 4-Panel Physicochemical Properties Parity Plot
         fig, axes = plt.subplots(2, 2, figsize=(12, 11), dpi=300)
         sub_idx = np.random.choice(N_test, size=min(15000, N_test), replace=False)
         panels = [
@@ -794,7 +808,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
         plt.close()
         print(f"Saved: {p_prop}")
 
-        # Plot 4: Similarity Distributions (Morgan Tanimoto & Latent Cosine)
         fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), dpi=300)
         ax = axes[0]
         ax.hist(tanimoto_sims, bins=35, color='#16a085', edgecolor='black', alpha=0.85, density=False)
@@ -828,7 +841,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
         plt.close()
         print(f"Saved: {p_sim}")
 
-        # Plot 5: Dynamic Thinking Step Parity Heatmap
         fig, ax = plt.subplots(figsize=(7.5, 6.5), dpi=300)
         max_s = min(6, int(max(np.max(true_steps), np.max(pred_halt_steps))))
         matrix = np.zeros((max_s, max_s), dtype=np.int32)
@@ -893,8 +905,10 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
         }
         with open(os.path.join(out_dir, "true_vs_pred_evaluation_metrics.json"), "w") as f:
             json.dump(eval_metrics, f, indent=2)
+        if out_dir != ".":
+            with open("true_vs_pred_evaluation_metrics.json", "w") as f:
+                json.dump(eval_metrics, f, indent=2)
 
-    # Plot 6: 2D PCA Trajectory Visualization
     fig, ax = plt.subplots(figsize=(9.5, 7.5), dpi=300)
     n_pts = min(60, N_test)
     z_p_np = torch.cat(all_z_p, dim=0)[:n_pts].numpy()
@@ -935,7 +949,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
     plt.close()
     print(f"Saved: {p_pca}")
 
-    # Plot 7: Intermediate Alignment Distribution Histogram
     fig, ax = plt.subplots(figsize=(8.5, 4.5), dpi=300)
     cos_vals = F.cosine_similarity(torch.cat(all_thought_states, dim=0), torch.cat(all_z_i1, dim=0), dim=-1).numpy()
     ax.hist(cos_vals, bins=25, color='#16a085', edgecolor='black', alpha=0.85)
@@ -954,7 +967,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
     plt.close()
     print(f"Saved: {p_inter}")
 
-    # Plot 8: 2D Chemical Structures Validation for 5 Diverse Test Reactions
     if unique_smiles is not None and lookup_fps is not None:
         print("Rendering 2D chemical structure comparisons for 5 retrosynthesis examples...")
         chosen_indices = [0, 1, 4, 6, 9]
@@ -1030,7 +1042,6 @@ def evaluate_and_generate_all_plots(trained_bundle, test_loader, gpu_table, devi
 
     return retrieval, eval_metrics
 
-# --- 6. Hugging Face Compatible Export ---
 def export_to_huggingface_format(trained_bundle, output_dir="./hf_dynamic_thinking_retro"):
     os.makedirs(output_dir, exist_ok=True)
     projector = trained_bundle["projector"]
@@ -1042,17 +1053,14 @@ def export_to_huggingface_format(trained_bundle, output_dir="./hf_dynamic_thinki
     for k, v in model.state_dict().items():
         state_dict[f"retro_model.{k}"] = v.contiguous()
 
-    # Save safetensors
     safetensors_path = os.path.join(output_dir, "model.safetensors")
     safetensors.torch.save_file(state_dict, safetensors_path)
     print(f"Saved Safetensors: {safetensors_path}")
 
-    # Save PyTorch bin
     bin_path = os.path.join(output_dir, "pytorch_model.bin")
     torch.save(state_dict, bin_path)
     print(f"Saved PyTorch Bin:  {bin_path}")
 
-    # Config JSON
     config = {
         "architectures": ["DynamicLatentThinkingRetroModel"],
         "model_type": "latent-thinking-retrosynthesis",
@@ -1070,7 +1078,6 @@ def export_to_huggingface_format(trained_bundle, output_dir="./hf_dynamic_thinki
     with open(os.path.join(output_dir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
 
-    # Generation Config
     generation_config = {
         "max_thought_steps": 6,
         "halting_threshold": 0.5,
@@ -1081,7 +1088,6 @@ def export_to_huggingface_format(trained_bundle, output_dir="./hf_dynamic_thinki
     with open(os.path.join(output_dir, "generation_config.json"), "w") as f:
         json.dump(generation_config, f, indent=2)
 
-    # Featurizer Config
     featurizer_config = {
         "featurizer_type": "MorganFP_Physicochemical",
         "fp_bits": 1024,
@@ -1099,7 +1105,6 @@ def export_to_huggingface_format(trained_bundle, output_dir="./hf_dynamic_thinki
     with open(os.path.join(output_dir, "featurizer_config.json"), "w") as f:
         json.dump(featurizer_config, f, indent=2)
 
-    # Tokenizer & Vocab JSON
     special_tokens = ["[PAD]", "[UNK]", "[BOS]", "[EOS]", "[SEP]", "[THINK]", "[INTERMEDIATE]", "[PRECURSOR]", "[HALT]"]
     atom_symbols = ["C", "c", "N", "n", "O", "o", "S", "s", "P", "p", "F", "Cl", "Br", "I", "B", "b", "Si", "H", "Na", "K", "Li", "Fe", "Zn", "Cu"]
     syntax_symbols = ["=", "#", "$", ":", "/", "\\", "@", "@@", "(", ")", "[", "]", "+", "-", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%"]
@@ -1133,14 +1138,23 @@ def export_to_huggingface_format(trained_bundle, output_dir="./hf_dynamic_thinki
 
 def main():
     parser = argparse.ArgumentParser(description="Chemical Retrosynthesis Training")
-    parser.add_argument("--routes_path", type=str, default="PaRoutes 2.0 and USPTO/all_loaded_routes.json.gz", help="Path to routes json.gz")
+    parser.add_argument("--routes_path", type=str, default="PaRoutes 2.0/all_loaded_routes.json.gz", help="Path to routes json or json.gz")
     parser.add_argument("--cache_path", type=str, default="preprocessed_routes_cache.npz", help="Path to binary disk cache")
-    parser.add_argument("--max_routes", type=int, default=0, help="Number of routes to load (0 for all 457k routes)")
+    parser.add_argument("--plots_dir", type=str, default="plots", help="Directory to save evaluation plots")
+    parser.add_argument("--model_path", type=str, default="retro_model.pt", help="Path to save model checkpoint")
+    parser.add_argument("--hf_model_dir", type=str, default="./retro_model", help="Directory for HuggingFace export")
+    parser.add_argument("--results_path", type=str, default="training_results.json", help="Path to save training results summary")
+    parser.add_argument("--max_routes", type=int, default=0, help="Number of routes to load (0 for all routes)")
     parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs (optimal default: 15)")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size for InfoNCE contrastive learning (optimal default: 256)")
     parser.add_argument("--latent_dim", type=int, default=256, help="Latent hypersphere dimension (optimal default: 256)")
     parser.add_argument("--num_workers", type=int, default=8, help="Number of parallel CPU worker threads")
     args = parser.parse_args()
+
+    os.makedirs(args.plots_dir, exist_ok=True)
+    os.makedirs(args.hf_model_dir, exist_ok=True)
+    if os.path.dirname(args.model_path):
+        os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
 
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1180,32 +1194,28 @@ def main():
     val_ds = CompactRouteDataset(p_ids[idx_val], r_ids[idx_val], inter_ids[idx_val], num_steps[idx_val])
     test_ds = CompactRouteDataset(p_ids[idx_test], r_ids[idx_test], inter_ids[idx_test], num_steps[idx_test])
 
-    # Multi-worker streaming with pin_memory (integer indices only - 0 CPU bottlenecks)
     loader_workers = min(4, os.cpu_count() or 2)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collate_indices, num_workers=loader_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_indices, num_workers=loader_workers, pin_memory=True)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_indices, num_workers=loader_workers, pin_memory=True)
 
-    # 3. Train Full Model
     trained_bundle = train_full_model(train_loader, val_loader, gpu_table, device, epochs=args.epochs, latent_dim=args.latent_dim)
 
-    # 4. Save standard PyTorch checkpoint
     torch.save({
         "projector_state_dict": trained_bundle["projector"].state_dict(),
         "model_state_dict": trained_bundle["model"].state_dict(),
         "latent_dim": args.latent_dim,
         "epochs": args.epochs
-    }, "dynamic_thinking_retro_model.pt")
-    print("Saved model checkpoint: retro_model.pt")
+    }, args.model_path)
+    print(f"Saved model checkpoint: {args.model_path}")
 
     retrieval, eval_metrics = evaluate_and_generate_all_plots(
         trained_bundle, test_loader, gpu_table, device,
         lookup_descs=lookup_descs, lookup_fps=lookup_fps,
-        unique_smiles=data.get("unique_smiles"), out_dir="."
+        unique_smiles=data.get("unique_smiles"), out_dir=args.plots_dir
     )
 
-    # 6. Export to Hugging Face Compatible Format
-    export_to_huggingface_format(trained_bundle, output_dir="./retro_model")
+    export_to_huggingface_format(trained_bundle, output_dir=args.hf_model_dir)
 
     summary = {
         "hardware": "Quadro P1000 (FP32)",
@@ -1219,7 +1229,7 @@ def main():
         "retrieval": retrieval,
         "true_vs_pred_metrics": eval_metrics
     }
-    with open("training_results.json", "w") as f:
+    with open(args.results_path, "w") as f:
         json.dump(summary, f, indent=2)
 
 
