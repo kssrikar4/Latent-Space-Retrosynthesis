@@ -1,4 +1,4 @@
-# Mechanism-aware-retrosynthesis
+# Latent-Space Retrosynthesis with Dynamic Pathway Unrolling
 
 This model implements a **Dynamic Mechanism-Aware Retrosynthesis Engine** that operates in a continuous latent space. 
 
